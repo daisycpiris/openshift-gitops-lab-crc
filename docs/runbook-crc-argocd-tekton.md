@@ -1,8 +1,8 @@
 # Runbook: CRC (OpenShift Local) + Argo CD (OpenShift GitOps) + Tekton (OpenShift Pipelines) en macOS
 
-**Objetivo:** levantar un laboratorio local en macOS con **CRC/OpenShift Local** y desplegar **Argo CD** y **Tekton**, con verificación y troubleshooting basado en problemas comunes.
+**Objetivo:** levantar un laboratorio local en macOS con **CRC/OpenShift Local** y desplegar **Argo CD** y **Tekton**, con verificación, operación diaria y troubleshooting basado en problemas reales del lab (DiskPressure/taints, pods Pending, rutas, credenciales).
 
-> Recomendación de recursos para lab con Argo+Tekton: **16 GB RAM** y **6 CPUs** asignadas a CRC.
+> Recomendación de recursos para lab con Argo+Tekton: **16 GB RAM** y **6 CPUs** asignadas a CRC (mínimo razonable).
 
 ---
 
@@ -16,11 +16,14 @@
 6. [Acceso a consola y oc](#6-acceso-a-consola-y-oc)  
 7. [Instalar Argo CD (OpenShift GitOps) por CLI/OLM](#7-instalar-argo-cd-openshift-gitops-por-cliolm)  
 8. [Crear instancia Argo CD + Route + credenciales](#8-crear-instancia-argo-cd--route--credenciales)  
-9. [Instalar Tekton (OpenShift Pipelines) por CLI/OLM](#9-instalar-tekton-openshift-pipelines-por-cliolm)  
-10. [Health checks](#10-health-checks)  
-11. [Comandos operativos CRC](#11-comandos-operativos-crc)  
-12. [Troubleshooting](#12-troubleshooting)  
-13. [Checklist final](#13-checklist-final)
+9. [Cambiar contraseña de admin en Argo CD](#9-cambiar-contraseña-de-admin-en-argo-cd)  
+10. [Instalar Tekton (OpenShift Pipelines) por CLI/OLM](#10-instalar-tekton-openshift-pipelines-por-cliolm)  
+11. [Health checks](#11-health-checks)  
+12. [Comandos operativos CRC](#12-comandos-operativos-crc)  
+13. [Limpieza preventiva para evitar DiskPressure/taints](#13-limpieza-preventiva-para-evitar-diskpressuretaints)  
+14. [Troubleshooting](#14-troubleshooting)  
+15. [Si ejecutás `crc delete`: qué pasos repetir](#15-si-ejecutás-crc-delete-qué-pasos-repetir)  
+16. [Checklist final](#16-checklist-final)
 
 ---
 
@@ -219,6 +222,8 @@ oc get route -n openshift-gitops
 ```
 
 ### 8.4 Password admin (OpenShift GitOps)
+En OpenShift GitOps el password suele estar en `argocd-secret` (no en `argocd-initial-admin-secret`).
+
 ```bash
 oc get secret -n openshift-gitops argocd-secret -o jsonpath='{.data.admin\.password}' | base64 -d; echo
 ```
@@ -228,9 +233,69 @@ oc get secret -n openshift-gitops argocd-secret -o jsonpath='{.data.admin\.passw
 
 ---
 
-## 9) Instalar Tekton (OpenShift Pipelines) por CLI/OLM
+## 9) Cambiar contraseña de admin en Argo CD
 
-### 9.1 Subscription (global en `openshift-operators`)
+### 9.1 Por qué no se guarda en texto plano
+Argo CD guarda el password como **hash bcrypt** dentro del Secret `argocd-secret`:
+- `admin.password` (bcrypt)
+- `admin.passwordMtime` (timestamp para forzar reload)
+
+### 9.2 Generar bcrypt en macOS (recomendado: `htpasswd`)
+Instalar herramienta:
+```bash
+brew install httpd
+```
+
+Generar hash (ejemplo):
+```bash
+htpasswd -nbBC 10 admin 'Admin1234!' | cut -d: -f2
+```
+
+> Recomendación: **no copies a mano** desde un output “sucio”. Mejor guardarlo en variable y parchar directo.
+
+### 9.3 Parchar el Secret con el hash (sin copiar/pegar)
+```bash
+NEWPASS='Admin1234!'
+HASH=$(htpasswd -nbBC 10 admin "${NEWPASS}" | cut -d: -f2)
+TS=$(date -u +%FT%TZ)
+
+oc -n openshift-gitops patch secret argocd-secret --type merge   -p "{"stringData":{"admin.password":"${HASH}","admin.passwordMtime":"${TS}"}}"
+```
+
+### 9.4 Reiniciar ArgoCD server para aplicar el cambio
+Ver nombre del deployment (puede variar):
+```bash
+oc -n openshift-gitops get deploy | grep -i server
+```
+
+Reiniciar (si el deployment es `openshift-gitops-server`):
+```bash
+oc -n openshift-gitops rollout restart deploy/openshift-gitops-server
+oc -n openshift-gitops rollout status deploy/openshift-gitops-server
+```
+
+### 9.5 Probar login sin depender de la Route (port-forward)
+Si la Route/certificados molestan, probá local:
+```bash
+oc -n openshift-gitops port-forward svc/openshift-gitops-server 8080:443
+```
+
+Abrir:
+- `https://localhost:8080`
+- user: `admin`
+- pass: el de `NEWPASS`
+
+### 9.6 Verificación del hash
+```bash
+oc -n openshift-gitops get secret argocd-secret -o jsonpath='{.data.admin\.password}' | base64 -d; echo
+oc -n openshift-gitops get secret argocd-secret -o jsonpath='{.data.admin\.passwordMtime}' | base64 -d; echo
+```
+
+---
+
+## 10) Instalar Tekton (OpenShift Pipelines) por CLI/OLM
+
+### 10.1 Subscription (global en `openshift-operators`)
 ```bash
 cat <<'EOF' | oc apply -f -
 apiVersion: operators.coreos.com/v1alpha1
@@ -247,7 +312,7 @@ spec:
 EOF
 ```
 
-### 9.2 Verificar CSV + pods
+### 10.2 Verificar CSV + pods
 ```bash
 oc get csv -n openshift-operators | grep -i pipelines
 oc get pods -n openshift-pipelines
@@ -255,7 +320,7 @@ oc get pods -n openshift-pipelines
 
 ---
 
-## 10) Health checks
+## 11) Health checks
 
 ### CRC / Cluster
 ```bash
@@ -277,7 +342,7 @@ oc get pods -n openshift-pipelines
 
 ---
 
-## 11) Comandos operativos CRC
+## 12) Comandos operativos CRC
 
 ### Start/Stop/Status
 ```bash
@@ -308,9 +373,80 @@ oc describe node crc | egrep -i 'Taints|DiskPressure|MemoryPressure|Ready' -A2
 
 ---
 
-## 12) Troubleshooting
+## 13) Limpieza preventiva para evitar DiskPressure/taints
 
-### 12.1 “No catalog items found” / confusión OperatorHub vs Software Catalog
+> Objetivo: evitar llegar a `node.kubernetes.io/disk-pressure:NoSchedule` y no tener que hacer `crc delete`.
+
+### 13.1 Señales de alerta temprana
+- Pods se quedan en `Pending`.
+- `oc describe node crc` muestra `DiskPressure True` o aparece taint `disk-pressure:NoSchedule`.
+- `crc status` muestra `Disk Usage` muy cerca del total dentro de la VM.
+
+### 13.2 Limpieza de pods terminados (suele ayudar y es segura)
+Borra pods `Completed/Succeeded` y `Failed` que se acumulan:
+
+```bash
+# GitOps
+oc delete pod -n openshift-gitops --field-selector=status.phase==Succeeded
+oc delete pod -n openshift-gitops --field-selector=status.phase==Failed
+
+# Pipelines
+oc delete pod -n openshift-pipelines --field-selector=status.phase==Succeeded
+oc delete pod -n openshift-pipelines --field-selector=status.phase==Failed
+```
+
+### 13.3 Limpieza de ejecuciones Tekton (PipelineRuns/TaskRuns)
+Tekton puede acumular historial y objetos rápidamente (lab = se pueden borrar):
+
+```bash
+# Ver lo que hay
+oc get pipelineruns -A
+oc get taskruns -A
+
+# Borrar en el namespace típico (ajusta si usas otro)
+oc delete pipelineruns -n openshift-pipelines --all
+oc delete taskruns -n openshift-pipelines --all
+```
+
+### 13.4 Limpieza de “basura” del cluster por label (opcional)
+Si querés borrar pods viejos por label (ejemplo apps), ajusta labels a tu caso.
+
+```bash
+# Ejemplo: borrar pods de una app por label
+oc delete pod -n <ns> -l app=<appname>
+```
+
+### 13.5 Reinicio “suave” de CRC (sin borrar cluster)
+Esto NO borra tu cluster, solo reinicia VM/servicios:
+
+```bash
+crc stop
+crc start -p ~/Downloads/pull-secret.txt
+```
+
+### 13.6 Limpiar cache de CRC en el host (cuando hay DiskPressure recurrente)
+Esto NO es `crc delete`, pero ayuda cuando el cache se vuelve grande:
+
+```bash
+crc stop
+rm -rf ~/.crc/cache
+crc start -p ~/Downloads/pull-secret.txt
+```
+
+### 13.7 Si el nodo quedó tainted y necesitas recuperar scheduling (workaround)
+**No recomendado como solución permanente**, pero puede destrabar mientras limpias.
+
+```bash
+oc adm taint nodes crc node.kubernetes.io/disk-pressure:NoSchedule-
+```
+
+> Si `DiskPressure` sigue en True, el taint puede volver. Lo correcto es liberar espacio.
+
+---
+
+## 14) Troubleshooting
+
+### 14.1 “No catalog items found” / confusión OperatorHub vs Software Catalog
 - Si el GUI no muestra operadores, confirmar catálogo por CLI:
 ```bash
 oc get packagemanifests | wc -l
@@ -318,7 +454,7 @@ oc get catalogsources -n openshift-marketplace
 ```
 - Solución práctica: instalar por CLI con `OperatorGroup` + `Subscription`.
 
-### 12.2 No se permite crear projects `openshift-*`
+### 14.2 No se permite crear projects `openshift-*`
 **Error:**
 `cannot request a project starting with "openshift-"`
 
@@ -332,7 +468,7 @@ metadata:
 EOF
 ```
 
-### 12.3 CSV FAILED: `UnsupportedOperatorGroup` / `OwnNamespace InstallModeType not supported`
+### 14.3 CSV FAILED: `UnsupportedOperatorGroup` / `OwnNamespace InstallModeType not supported`
 **Causa:** OperatorGroup en OwnNamespace.
 
 **Solución:** OperatorGroup AllNamespaces (`spec: {}`), luego reinstalar/reintentar:
@@ -355,61 +491,52 @@ oc get csv -n gitops-operator
 oc delete csv -n gitops-operator <NOMBRE_DEL_CSV>
 ```
 
-### 12.4 Argo CD: Route muestra “Application is not available”
-**Causa típica:** pods Pending por recursos insuficientes.
+### 14.4 Argo CD: Route muestra “Application is not available”
+**Causa típica:** pods Pending por recursos insuficientes o node tainted por DiskPressure.
 
 Diagnóstico:
 ```bash
 oc get pods -n openshift-gitops
-oc describe pod -n openshift-gitops <pod-pending> | tail -n 40
+oc describe node crc | egrep -i "Taints|DiskPressure|Ready"
 ```
 
-Si dice `Insufficient memory`, subir recursos y reiniciar CRC:
-```bash
-crc stop
-crc config set memory 16384
-crc config set cpus 6
-crc start -p ~/Downloads/pull-secret.txt
-```
+Solución (lab):
+- aplicar limpieza preventiva (sección 13),
+- reiniciar CRC sin borrar cluster,
+- evitar llenar el disco.
 
-### 12.5 Tekton Triggers Pending por taint `disk-pressure`
-Diagnóstico:
-```bash
-oc describe node crc | egrep -i "Taints|DiskPressure"
-```
-
-Si hay:
-`node.kubernetes.io/disk-pressure:NoSchedule`
-
-Solución práctica (lab): liberar/limpiar cache local y reiniciar CRC:
-```bash
-crc stop
-rm -rf ~/.crc/cache
-crc start -p ~/Downloads/pull-secret.txt
-```
-
-Si queda un pod duplicado en `Error` y ya hay otro Running, borrar el pod fallido:
-```bash
-oc get pods -n openshift-pipelines | grep triggers
-oc delete pod -n openshift-pipelines <pod-en-error>
-```
-
-### 12.6 Argo CD: “invalid username or password”
+### 14.5 Argo CD: “invalid username or password”
 - Confirmar que estás en la **Route de ArgoCD** (no la consola OpenShift).
-- Password correcto (OpenShift GitOps):
+- Confirmar `admin.enabled`:
 ```bash
-oc get secret -n openshift-gitops argocd-secret -o jsonpath='{.data.admin\.password}' | base64 -d; echo
+oc -n openshift-gitops get cm argocd-cm -o jsonpath='{.data.admin\.enabled}{"\n"}'
 ```
-
-Si reseteaste el password, reiniciar el server:
-```bash
-oc rollout restart deployment -n openshift-gitops openshift-gitops-server
-oc rollout status deployment -n openshift-gitops openshift-gitops-server
-```
+- Reset de password con la sección 9 (bcrypt + patch + restart).
+- Alternativa: probar por `port-forward` para evitar issues de Route/certs.
 
 ---
 
-## 13) Checklist final
+## 15) Si ejecutás `crc delete`: qué pasos repetir
+
+### 15.1 Qué hace `crc delete`
+`crc delete` borra **todo** el cluster local (VM + recursos). Se pierde:
+- operadores (GitOps/Pipelines),
+- namespaces creados,
+- routes,
+- secrets,
+- CRDs y toda configuración del lab.
+
+### 15.2 Qué repetir después de `crc delete` (resumen)
+1. `crc start -p ~/Downloads/pull-secret.txt`  
+2. Reconfigurar recursos si hace falta (`crc config set memory/cpus`).  
+3. Instalar GitOps operator (sección 7).  
+4. Crear namespace `openshift-gitops` + ArgoCD CR (sección 8).  
+5. Instalar Pipelines operator (sección 10).  
+6. Re-aplicar manifests de tu “hello world”/GitOps desde GitHub (tu repo vuelve a ser la fuente de verdad).
+
+---
+
+## 16) Checklist final
 
 - [ ] `crc status` → OpenShift Running  
 - [ ] `oc get nodes` → nodo Ready  
