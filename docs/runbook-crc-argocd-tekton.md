@@ -259,7 +259,8 @@ NEWPASS='Admin1234!'
 HASH=$(htpasswd -nbBC 10 admin "${NEWPASS}" | cut -d: -f2)
 TS=$(date -u +%FT%TZ)
 
-oc -n openshift-gitops patch secret argocd-secret --type merge   -p "{"stringData":{"admin.password":"${HASH}","admin.passwordMtime":"${TS}"}}"
+oc -n openshift-gitops patch secret argocd-secret --type merge \
+  -p '{"stringData":{"admin.password":"'"${HASH}"'","admin.passwordMtime":"'"${TS}"'"}}'
 ```
 
 ### 9.4 Reiniciar ArgoCD server para aplicar el cambio
