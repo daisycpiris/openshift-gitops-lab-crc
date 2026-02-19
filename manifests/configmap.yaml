@@ -1,0 +1,18 @@
+apiVersion: v1
+data:
+  index.html: "<!doctype html>\n<html>\n  <head><meta charset=\"utf-8\"><title>Hello</title></head>\n
+    \ <body style=\"font-family: sans-serif;\">\n    <h1>Hello World \U0001F44B</h1>\n
+    \   <p>Hello from CRC + ArgoCD + Tekton!</p>\n  </body>\n</html>\n"
+kind: ConfigMap
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: "{\"apiVersion\":\"v1\",\"data\":{\"index.html\":\"\\u003c!doctype
+      html\\u003e\\n\\u003chtml\\u003e\\n  \\u003chead\\u003e\\u003cmeta charset=\\\"utf-8\\\"\\u003e\\u003ctitle\\u003eHello\\u003c/title\\u003e\\u003c/head\\u003e\\n
+      \ \\u003cbody style=\\\"font-family: sans-serif;\\\"\\u003e\\n    \\u003ch1\\u003eHello
+      World \U0001F44B\\u003c/h1\\u003e\\n    \\u003cp\\u003eHello from CRC + ArgoCD
+      + Tekton!\\u003c/p\\u003e\\n  \\u003c/body\\u003e\\n\\u003c/html\\u003e\\n\"},\"kind\":\"ConfigMap\",\"metadata\":{\"annotations\":{},\"name\":\"hello-index\",\"namespace\":\"hello-http\"}}\n"
+  creationTimestamp: "2026-02-19T13:10:07Z"
+  name: hello-index
+  namespace: hello-http
+  resourceVersion: "108800"
+  uid: 7fc62f07-0566-4e0a-8608-817491676b5a
