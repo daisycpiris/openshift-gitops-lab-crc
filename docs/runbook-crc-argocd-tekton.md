@@ -1,6 +1,6 @@
 # Runbook: CRC (OpenShift Local) + Argo CD (OpenShift GitOps) + Tekton (OpenShift Pipelines) en macOS
 
-**Objetivo:** levantar un laboratorio local en macOS con **CRC/OpenShift Local** y desplegar **Argo CD** y **Tekton**, con verificación, operación diaria y troubleshooting basado en problemas reales del lab (DiskPressure/taints, pods Pending, rutas, credenciales).
+**Objetivo:** levantar un laboratorio local en macOS con **CRC/OpenShift Local** y desplegar **Argo CD** y **Tekton**, con verificación, operación diaria y troubleshooting basado en problemas reales del lab (DiskPressure/taints, pods Pending, rutas, credenciales, GitOps sync, imágenes “short-name enforcing”, etc.).
 
 > Recomendación de recursos para lab con Argo+Tekton: **16 GB RAM** y **6 CPUs** asignadas a CRC (mínimo razonable).
 
@@ -23,7 +23,8 @@
 13. [Limpieza preventiva para evitar DiskPressure/taints](#13-limpieza-preventiva-para-evitar-diskpressuretaints)  
 14. [Troubleshooting](#14-troubleshooting)  
 15. [Si ejecutás `crc delete`: qué pasos repetir](#15-si-ejecutás-crc-delete-qué-pasos-repetir)  
-16. [Checklist final](#16-checklist-final)
+16. [Checklist final](#16-checklist-final)  
+17. [Mini caso real (historia paso a paso): hello-http con GitOps](#17-mini-caso-real-historia-paso-a-paso-hello-http-con-gitops)
 
 ---
 
@@ -251,7 +252,7 @@ Generar hash (ejemplo):
 htpasswd -nbBC 10 admin 'Admin1234!' | cut -d: -f2
 ```
 
-> Recomendación: **no copies a mano** desde un output “sucio”. Mejor guardarlo en variable y parchar directo.
+> Comentario: evitá copiar/pegar “a mano” si el terminal mete caracteres raros; mejor usar variables y patch directo.
 
 ### 9.3 Parchar el Secret con el hash (sin copiar/pegar)
 ```bash
@@ -264,19 +265,13 @@ oc -n openshift-gitops patch secret argocd-secret --type merge \
 ```
 
 ### 9.4 Reiniciar ArgoCD server para aplicar el cambio
-Ver nombre del deployment (puede variar):
 ```bash
 oc -n openshift-gitops get deploy | grep -i server
-```
-
-Reiniciar (si el deployment es `openshift-gitops-server`):
-```bash
 oc -n openshift-gitops rollout restart deploy/openshift-gitops-server
 oc -n openshift-gitops rollout status deploy/openshift-gitops-server
 ```
 
 ### 9.5 Probar login sin depender de la Route (port-forward)
-Si la Route/certificados molestan, probá local:
 ```bash
 oc -n openshift-gitops port-forward svc/openshift-gitops-server 8080:443
 ```
@@ -284,13 +279,7 @@ oc -n openshift-gitops port-forward svc/openshift-gitops-server 8080:443
 Abrir:
 - `https://localhost:8080`
 - user: `admin`
-- pass: el de `NEWPASS`
-
-### 9.6 Verificación del hash
-```bash
-oc -n openshift-gitops get secret argocd-secret -o jsonpath='{.data.admin\.password}' | base64 -d; echo
-oc -n openshift-gitops get secret argocd-secret -o jsonpath='{.data.admin\.passwordMtime}' | base64 -d; echo
-```
+- pass: `NEWPASS`
 
 ---
 
@@ -366,7 +355,7 @@ crc config set memory 16384
 crc config set cpus 6
 ```
 
-### Diagnóstico general
+### Diagnóstico general (golden commands)
 ```bash
 oc get events -A --sort-by='.lastTimestamp' | tail -n 50
 oc describe node crc | egrep -i 'Taints|DiskPressure|MemoryPressure|Ready' -A2
@@ -383,9 +372,7 @@ oc describe node crc | egrep -i 'Taints|DiskPressure|MemoryPressure|Ready' -A2
 - `oc describe node crc` muestra `DiskPressure True` o aparece taint `disk-pressure:NoSchedule`.
 - `crc status` muestra `Disk Usage` muy cerca del total dentro de la VM.
 
-### 13.2 Limpieza de pods terminados (suele ayudar y es segura)
-Borra pods `Completed/Succeeded` y `Failed` que se acumulan:
-
+### 13.2 Limpieza de pods terminados (segura en lab)
 ```bash
 # GitOps
 oc delete pod -n openshift-gitops --field-selector=status.phase==Succeeded
@@ -397,143 +384,143 @@ oc delete pod -n openshift-pipelines --field-selector=status.phase==Failed
 ```
 
 ### 13.3 Limpieza de ejecuciones Tekton (PipelineRuns/TaskRuns)
-Tekton puede acumular historial y objetos rápidamente (lab = se pueden borrar):
-
 ```bash
-# Ver lo que hay
 oc get pipelineruns -A
 oc get taskruns -A
 
-# Borrar en el namespace típico (ajusta si usas otro)
 oc delete pipelineruns -n openshift-pipelines --all
 oc delete taskruns -n openshift-pipelines --all
 ```
 
-### 13.4 Limpieza de “basura” del cluster por label (opcional)
-Si querés borrar pods viejos por label (ejemplo apps), ajusta labels a tu caso.
-
-```bash
-# Ejemplo: borrar pods de una app por label
-oc delete pod -n <ns> -l app=<appname>
-```
-
-### 13.5 Reinicio “suave” de CRC (sin borrar cluster)
-Esto NO borra tu cluster, solo reinicia VM/servicios:
-
+### 13.4 Reinicio “suave” de CRC (sin borrar cluster)
 ```bash
 crc stop
 crc start -p ~/Downloads/pull-secret.txt
 ```
 
-### 13.6 Limpiar cache de CRC en el host (cuando hay DiskPressure recurrente)
-Esto NO es `crc delete`, pero ayuda cuando el cache se vuelve grande:
-
-```bash
-crc stop
-rm -rf ~/.crc/cache
-crc start -p ~/Downloads/pull-secret.txt
-```
-
-### 13.7 Si el nodo quedó tainted y necesitas recuperar scheduling (workaround)
-**No recomendado como solución permanente**, pero puede destrabar mientras limpias.
-
+### 13.5 Workaround si el nodo quedó tainted (solo para destrabar)
 ```bash
 oc adm taint nodes crc node.kubernetes.io/disk-pressure:NoSchedule-
 ```
 
-> Si `DiskPressure` sigue en True, el taint puede volver. Lo correcto es liberar espacio.
+> Comentario: si `DiskPressure=True` el taint puede volver. Lo correcto es liberar espacio.
 
 ---
 
 ## 14) Troubleshooting
 
 ### 14.1 “No catalog items found” / confusión OperatorHub vs Software Catalog
-- Si el GUI no muestra operadores, confirmar catálogo por CLI:
 ```bash
 oc get packagemanifests | wc -l
 oc get catalogsources -n openshift-marketplace
 ```
-- Solución práctica: instalar por CLI con `OperatorGroup` + `Subscription`.
+Solución práctica: instalar por CLI con `OperatorGroup` + `Subscription`.
 
 ### 14.2 No se permite crear projects `openshift-*`
-**Error:**
-`cannot request a project starting with "openshift-"`
-
-**Solución:** crear como `Namespace` YAML:
-```bash
-oc apply -f - <<'EOF'
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: openshift-gitops
-EOF
-```
+**Error:** `cannot request a project starting with "openshift-"`
+**Solución:** crear como `Namespace` YAML (ver sección 8.1).
 
 ### 14.3 CSV FAILED: `UnsupportedOperatorGroup` / `OwnNamespace InstallModeType not supported`
-**Causa:** OperatorGroup en OwnNamespace.
+Causa: OperatorGroup en OwnNamespace.  
+Solución: OperatorGroup AllNamespaces (`spec: {}`), luego reintentar.
 
-**Solución:** OperatorGroup AllNamespaces (`spec: {}`), luego reinstalar/reintentar:
+### 14.4 Pods “Pending / ContainerCreating” por CNI (Multus/OVN) + eventos
+**Señal típica:** el pod queda en `ContainerCreating` y en eventos ves errores de sandbox/network.
+
+Comandos de diagnóstico:
 ```bash
-oc delete operatorgroup gitops-operator-group -n gitops-operator
-
-cat <<'EOF' | oc apply -f -
-apiVersion: operators.coreos.com/v1
-kind: OperatorGroup
-metadata:
-  name: gitops-operator-group
-  namespace: gitops-operator
-spec: {}
-EOF
+oc -n <ns> get pods -o wide
+oc -n <ns> describe pod <pod> | tail -n 80
+oc -n <ns> get events --sort-by='.lastTimestamp' | tail -n 50
 ```
 
-Si el CSV quedó en Failed, borrar el CSV para que OLM lo recree:
+**Workaround que funcionó en lab (reiniciar componentes de red):**
+- Verificar estado de pods OVN y Multus:
 ```bash
-oc get csv -n gitops-operator
-oc delete csv -n gitops-operator <NOMBRE_DEL_CSV>
+oc -n openshift-multus get pods
+oc -n openshift-ovn-kubernetes get pods
 ```
+- Si ves `ovnkube-node` no Ready (ej: 7/8), reiniciá el pod del daemonset (en CRC hay 1):
+```bash
+oc -n openshift-ovn-kubernetes delete pod -l app=ovnkube-node
+oc -n openshift-ovn-kubernetes get pods -w
+```
+> Comentario: una vez que `ovnkube-node` quedó 8/8 Running, desaparecieron los errores de red en nuevos pods.
 
-### 14.4 Argo CD: Route muestra “Application is not available”
-**Causa típica:** pods Pending por recursos insuficientes o node tainted por DiskPressure.
+### 14.5 Error real: `ImageInspectError` por “short name mode is enforcing”
+**Síntomo (real):**
+- Pod queda `ImageInspectError`
+- Mensaje tipo: “short name mode is enforcing … returns ambiguous list”
 
 Diagnóstico:
 ```bash
-oc get pods -n openshift-gitops
-oc describe node crc | egrep -i "Taints|DiskPressure|Ready"
+oc -n <ns> describe pod <pod> | tail -n 80
+oc -n <ns> get pod <pod> -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}{"\n"}{.status.containerStatuses[0].state.waiting.message}{"\n"}'
 ```
 
-Solución (lab):
-- aplicar limpieza preventiva (sección 13),
-- reiniciar CRC sin borrar cluster,
-- evitar llenar el disco.
+**Solución que funcionó:** **usar imagen fully qualified** (por ejemplo `docker.io/...`) en el YAML del Deployment y hacer sync con Argo.
 
-### 14.5 Argo CD: “invalid username or password”
-- Confirmar que estás en la **Route de ArgoCD** (no la consola OpenShift).
-- Confirmar `admin.enabled`:
+Ejemplo:
+- `nginxinc/nginx-unprivileged:stable`
+- `docker.io/nginxinc/nginx-unprivileged:stable`
+
+### 14.6 ArgoCD “Synced pero Suspended / App no aplica cambios”
+Si `Application` dice `Suspended`, o no aplica cambios automáticamente:
+- Hacer **sync manual** desde la UI de ArgoCD.
+- O forzar refresh:
 ```bash
-oc -n openshift-gitops get cm argocd-cm -o jsonpath='{.data.admin\.enabled}{"\n"}'
+oc -n openshift-gitops annotate application hello-http argocd.argoproj.io/refresh=hard --overwrite
 ```
-- Reset de password con la sección 9 (bcrypt + patch + restart).
-- Alternativa: probar por `port-forward` para evitar issues de Route/certs.
+
+**Qué seleccionar en la pantalla de Sync (recomendación práctica para lab):**
+- **Sync options**:
+  - Prune (si querés que borre recursos que ya no están en Git)
+  - Apply Out of Sync Only (opcional; más rápido y seguro)
+  - Create Namespace (solo si tu app administra namespaces y querés que Argo cree el ns)
+  - Force (solo si estás trabado por drift/estado raro; úsalo como “martillo”)
+- **Strategy**:
+  - Generalmente Apply (default) alcanza.
+- **Dry run**:
+  - desactivado cuando querés aplicar de verdad.
+
+> Comentario: el sync manual desde la consola de ArgoCD fue lo que finalmente actualizó el Deployment al `docker.io/...`.
+
+### 14.7 Rollout trabado: “1 old replicas are pending termination…”
+Esto puede pasar si el rollout no puede crear el nuevo pod o el viejo no termina.
+
+Comandos útiles:
+```bash
+oc -n <ns> rollout status deploy/<deploy>
+oc -n <ns> get rs
+oc -n <ns> get pods -o wide
+```
+
+Acciones típicas en lab:
+```bash
+oc -n <ns> delete pod -l app=<app> --force --grace-period=0
+```
+
+> Comentario: borrar pods “a la fuerza” sirve para destrabar, pero la causa real suele estar en CNI o en imagen.
 
 ---
 
 ## 15) Si ejecutás `crc delete`: qué pasos repetir
 
 ### 15.1 Qué hace `crc delete`
-`crc delete` borra **todo** el cluster local (VM + recursos). Se pierde:
+Borra **todo** el cluster local (VM + recursos). Se pierde:
 - operadores (GitOps/Pipelines),
 - namespaces creados,
 - routes,
 - secrets,
-- CRDs y toda configuración del lab.
+- CRDs y configuración del lab.
 
 ### 15.2 Qué repetir después de `crc delete` (resumen)
 1. `crc start -p ~/Downloads/pull-secret.txt`  
-2. Reconfigurar recursos si hace falta (`crc config set memory/cpus`).  
+2. Reconfigurar recursos (`crc config set memory/cpus`).  
 3. Instalar GitOps operator (sección 7).  
-4. Crear namespace `openshift-gitops` + ArgoCD CR (sección 8).  
+4. Crear `openshift-gitops` + ArgoCD CR (sección 8).  
 5. Instalar Pipelines operator (sección 10).  
-6. Re-aplicar manifests de tu “hello world”/GitOps desde GitHub (tu repo vuelve a ser la fuente de verdad).
+6. Re-aplicar manifests GitOps desde GitHub (Git vuelve a ser fuente de verdad).
 
 ---
 
@@ -542,7 +529,211 @@ oc -n openshift-gitops get cm argocd-cm -o jsonpath='{.data.admin\.enabled}{"\n"
 - [ ] `crc status` → OpenShift Running  
 - [ ] `oc get nodes` → nodo Ready  
 - [ ] `oc get csv -n gitops-operator` → GitOps operator Succeeded  
-- [ ] `oc get pods -n openshift-gitops` → todos Running 1/1  
-- [ ] `oc get route -n openshift-gitops` → URL accesible y login ok  
+- [ ] `oc get pods -n openshift-gitops` → todos Running  
+- [ ] `oc get route -n openshift-gitops` → URL accesible, login ok  
 - [ ] `oc get csv -n openshift-operators | grep pipelines` → Succeeded  
 - [ ] `oc get pods -n openshift-pipelines` → pods Running  
+- [ ] ArgoCD `Application` → `Synced / Healthy`
+
+---
+
+## 17) Mini caso real (historia paso a paso): hello-http con GitOps
+
+### 17.1 Objetivo del mini caso
+Desplegar `hello-http` vía ArgoCD (GitOps), y resolver problemas reales hasta llegar a:
+- `Application`: **Synced / Healthy**
+- `Deployment rollout`: **successfully rolled out**
+- `Pod`: **Running**
+
+---
+
+### 17.2 Manifiesto base del Deployment (Git)
+Archivo:
+```bash
+apps/hello-http/manifests/deploy.yaml
+```
+
+Ejemplo (importante: imagen fully qualified cuando aplica):
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hello-http
+  namespace: hello-http
+  labels:
+    app: hello-http
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hello-http
+  template:
+    metadata:
+      labels:
+        app: hello-http
+    spec:
+      containers:
+        - name: nginx
+          image: docker.io/nginxinc/nginx-unprivileged:stable
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: web
+              mountPath: /usr/share/nginx/html
+      volumes:
+        - name: web
+          configMap:
+            name: hello-index
+```
+
+---
+
+### 17.3 Diagnóstico real 1: pods en `ContainerCreating` (CNI / Multus / OVN)
+**Síntomas que viste:**
+- Pod del nuevo ReplicaSet queda `ContainerCreating`
+- En `events` aparece error de sandbox/network con Multus y “Unauthorized”.
+
+**Comandos que ayudaron:**
+```bash
+oc -n hello-http get pods -o wide
+oc -n hello-http get events --sort-by='.lastTimestamp' | tail -n 20
+
+oc -n openshift-multus get pods
+oc -n openshift-ovn-kubernetes get pods
+```
+
+**Fix que funcionó (reiniciar OVN node):**
+```bash
+oc -n openshift-ovn-kubernetes delete pod -l app=ovnkube-node
+oc -n openshift-ovn-kubernetes get pods
+```
+
+> Comentario: cuando `ovnkube-node` quedó 8/8 Running, el problema de CNI dejó de repetirse en nuevos pods.
+
+---
+
+### 17.4 Diagnóstico real 2: `ImageInspectError` por short-name enforcing
+**Síntoma que viste:**
+```bash
+oc -n hello-http describe pod <pod> | tail -n 80
+# ...
+# Failed to inspect image "": short name mode is enforcing ... ambiguous list
+```
+
+**Causa práctica (lab):** imagen no fully qualified:
+- `nginxinc/nginx-unprivileged:stable` → ambiguo en el runtime (short-name enforcing)
+- Solución: `docker.io/nginxinc/nginx-unprivileged:stable`
+
+---
+
+### 17.5 Fix real aplicado en Git con `sed` + git push (lo que hiciste y funcionó)
+
+**Editar YAML con `sed` (macOS):**
+```bash
+sed -i '' 's#image: nginxinc/nginx-unprivileged:stable#image: docker.io/nginxinc/nginx-unprivileged:stable#' apps/hello-http/manifests/deploy.yaml
+grep -n "image:" apps/hello-http/manifests/deploy.yaml
+```
+
+**Commits y push:**
+```bash
+git add apps/hello-http/manifests/deploy.yaml
+git commit -m "Fully qualify nginx unprivileged image"
+git push
+```
+
+---
+
+### 17.6 Sync real en ArgoCD (lo que destrabó)
+Aunque intentaste refresh por CLI, lo que terminó de aplicar fue:
+- Sync manual desde la consola web de ArgoCD (Application → Sync).
+
+Verificación posterior (funcionó):
+```bash
+oc -n openshift-gitops get application hello-http \
+  -o jsonpath='{.status.sync.status}{"\n"}{.status.health.status}{"\n"}{.status.sync.revision}{"\n"}'
+# Synced
+# Healthy
+# <commit>
+```
+
+Y en el deploy:
+```bash
+oc -n hello-http get deploy hello-http -o jsonpath='{.spec.template.spec.containers[0].image}{"\n"}'
+# docker.io/nginxinc/nginx-unprivileged:stable
+```
+
+---
+
+### 17.7 Rollout final: recrear pod y confirmar Running
+**Borrar pod por label (lab-friendly) para que recree con la nueva imagen:**
+```bash
+oc -n hello-http delete pod -l app=hello-http --force --grace-period=0
+```
+
+**Verificar:**
+```bash
+oc -n hello-http get pods -o wide
+oc -n hello-http rollout status deploy/hello-http
+```
+
+Esperado:
+- Pod `Running`
+- `deployment "hello-http" successfully rolled out`
+
+---
+
+### 17.8 Extra: dejar `replicas` “permanente” en el YAML con sed
+Si querés fijar `replicas: 1` (o el valor que quieras) directamente en Git:
+
+```bash
+# Setear replicas a 1 en el YAML del deploy (asume que ya existe la línea "replicas:")
+sed -i '' 's/^[[:space:]]*replicas:[[:space:]]*[0-9]\+/  replicas: 1/' apps/hello-http/manifests/deploy.yaml
+
+git add apps/hello-http/manifests/deploy.yaml
+git commit -m "Set hello-http replicas to 1"
+git push
+```
+
+> Comentario: esto evita “parches manuales” en cluster que después Argo te pisa.
+
+---
+
+### 17.9 Revert real (cuando “apliqué el cambio pero no quería”)
+Si querés revertir el último commit (recomendado en GitOps):
+
+```bash
+git revert HEAD
+git push
+```
+
+Si querés revertir un commit específico:
+```bash
+git log --oneline --max-count=10
+git revert <SHA_DEL_COMMIT>
+git push
+```
+
+> Comentario: en GitOps, revert en Git es lo más limpio. Evitás drift con el cluster.
+
+---
+
+### 17.10 Higiene: limitar historial de ReplicaSets en el YAML (no con patch)
+En vez de:
+```bash
+oc -n hello-http patch deploy hello-http -p '{"spec":{"revisionHistoryLimit":3}}'
+```
+
+Hacelo en Git (permanente):
+
+```bash
+# Inserta revisionHistoryLimit debajo de replicas (si tu archivo tiene replicas: en spec)
+sed -i '' '/^[[:space:]]*replicas:[[:space:]]*[0-9]\+/a\
+\  revisionHistoryLimit: 3
+' apps/hello-http/manifests/deploy.yaml
+
+git add apps/hello-http/manifests/deploy.yaml
+git commit -m "Set revisionHistoryLimit to 3"
+git push
+```
+
+> Comentario: si ya existe revisionHistoryLimit, mejor reemplazarla (evitás duplicados).
