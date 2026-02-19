@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: hello-http
   namespace: hello-http
+  labels:
+    app: hello-http
 spec:
   replicas: 1
   selector:
@@ -14,14 +16,14 @@ spec:
         app: hello-http
     spec:
       containers:
-      - name: nginx
-        image: registry.access.redhat.com/ubi9/nginx-120
-        ports:
-        - containerPort: 8080
-        volumeMounts:
-        - name: web
-          mountPath: /usr/share/nginx/html
+        - name: nginx
+          image: nginxinc/nginx-unprivileged:stable
+          ports:
+            - containerPort: 8080
+          volumeMounts:
+            - name: web
+              mountPath: /usr/share/nginx/html
       volumes:
-      - name: web
-        configMap:
-          name: hello-index
+        - name: web
+          configMap:
+            name: hello-index
