@@ -1,0 +1,28 @@
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: hello-http-ci-run-
+spec:
+  serviceAccountName: pipeline
+  pipelineRef:
+    name: hello-http-ci
+  workspaces:
+    - name: shared
+      volumeClaimTemplate:
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 1Gi
+  params:
+    - name: url
+      value: https://github.com/daisycpiris/openshift-gitops-lab-crc.git
+    - name: revision
+      value: main
+    - name: commitMessage
+      value: "CI: set replicas to 2"
+    - name: fileToEdit
+      value: "apps/hello-http/manifests/deploy.yaml"
+    - name: sedExpr
+      value: "s#replicas: 1#replicas: 2#"
