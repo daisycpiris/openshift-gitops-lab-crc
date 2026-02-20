@@ -10,6 +10,6 @@ data:
       <head><meta charset="utf-8"><title>Hello</title></head>
       <body style="font-family: sans-serif;">
         <h1>Hello World 👋</h1>
-        <p>Hello from CRC + ArgoCD + Tekton!</p>
+        <p>It is Friday!</p>
       </body>
     </html>
