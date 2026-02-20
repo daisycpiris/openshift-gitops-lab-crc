@@ -1,0 +1,59 @@
+apiVersion: tekton.dev/v1
+kind: Pipeline
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"tekton.dev/v1","kind":"Pipeline","metadata":{"annotations":{},"name":"hello-http-ci","namespace":"hello-http-ci"},"spec":{"params":[{"name":"url","type":"string"},{"default":"main","name":"revision","type":"string"},{"default":"CI: update hello-http deploy","name":"commitMessage","type":"string"},{"default":"apps/hello-http/manifests/deploy.yaml","name":"fileToEdit","type":"string"},{"default":"s#replicas: 1#replicas: 1#","name":"sedExpr","type":"string"}],"tasks":[{"name":"clone","params":[{"name":"url","value":"$(params.url)"},{"name":"revision","value":"$(params.revision)"}],"taskRef":{"name":"git-clone-simple"},"workspaces":[{"name":"output","workspace":"shared"}]},{"name":"commit-push","params":[{"name":"commitMessage","value":"$(params.commitMessage)"},{"name":"fileToEdit","value":"$(params.fileToEdit)"},{"name":"sedExpr","value":"$(params.sedExpr)"}],"runAfter":["clone"],"taskRef":{"name":"git-commit-push"},"workspaces":[{"name":"output","workspace":"shared"}]}],"workspaces":[{"name":"shared"}]}}
+  creationTimestamp: "2026-02-20T02:02:18Z"
+  generation: 1
+  name: hello-http-ci
+  namespace: hello-http-ci
+  resourceVersion: "288989"
+  uid: 7ea17422-8fac-49b4-947a-f233fba4fd65
+spec:
+  params:
+  - name: url
+    type: string
+  - default: main
+    name: revision
+    type: string
+  - default: 'CI: update hello-http deploy'
+    name: commitMessage
+    type: string
+  - default: apps/hello-http/manifests/deploy.yaml
+    name: fileToEdit
+    type: string
+  - default: 's#replicas: 1#replicas: 1#'
+    name: sedExpr
+    type: string
+  tasks:
+  - name: clone
+    params:
+    - name: url
+      value: $(params.url)
+    - name: revision
+      value: $(params.revision)
+    taskRef:
+      kind: Task
+      name: git-clone-simple
+    workspaces:
+    - name: output
+      workspace: shared
+  - name: commit-push
+    params:
+    - name: commitMessage
+      value: $(params.commitMessage)
+    - name: fileToEdit
+      value: $(params.fileToEdit)
+    - name: sedExpr
+      value: $(params.sedExpr)
+    runAfter:
+    - clone
+    taskRef:
+      kind: Task
+      name: git-commit-push
+    workspaces:
+    - name: output
+      workspace: shared
+  workspaces:
+  - name: shared

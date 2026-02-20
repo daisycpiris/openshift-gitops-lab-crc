@@ -1,0 +1,32 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  annotations:
+    kubectl.kubernetes.io/last-applied-configuration: |
+      {"apiVersion":"tekton.dev/v1","kind":"Task","metadata":{"annotations":{},"name":"git-clone-simple","namespace":"hello-http-ci"},"spec":{"params":[{"name":"url","type":"string"},{"default":"main","name":"revision","type":"string"}],"steps":[{"image":"registry.access.redhat.com/ubi9/git:latest","name":"clone","script":"#!/usr/bin/env bash\nset -euxo pipefail\ngit clone --branch \"$(params.revision)\" \"$(params.url)\" repo\nls -la repo\n","workingDir":"$(workspaces.output.path)"}],"workspaces":[{"name":"output"}]}}
+  creationTimestamp: "2026-02-20T00:47:05Z"
+  generation: 3
+  name: git-clone-simple
+  namespace: hello-http-ci
+  resourceVersion: "279935"
+  uid: 78f59cc0-9a1f-4eb1-892e-695f2103a95d
+spec:
+  params:
+  - name: url
+    type: string
+  - default: main
+    name: revision
+    type: string
+  steps:
+  - computeResources: {}
+    image: docker.io/alpine/git:latest
+    name: clone
+    script: |
+      #!/bin/sh
+      set -eux
+
+      git clone --branch "$(params.revision)" "$(params.url)" repo
+      ls -la repo
+    workingDir: $(workspaces.output.path)
+  workspaces:
+  - name: output
