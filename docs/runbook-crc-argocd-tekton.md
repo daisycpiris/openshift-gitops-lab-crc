@@ -260,8 +260,7 @@ NEWPASS='Admin1234!'
 HASH=$(htpasswd -nbBC 10 admin "${NEWPASS}" | cut -d: -f2)
 TS=$(date -u +%FT%TZ)
 
-oc -n openshift-gitops patch secret argocd-secret --type merge \
-  -p '{"stringData":{"admin.password":"'"${HASH}"'","admin.passwordMtime":"'"${TS}"'"}}'
+oc -n openshift-gitops patch secret argocd-secret --type merge   -p '{"stringData":{"admin.password":"'"${HASH}"'","admin.passwordMtime":"'"${TS}"'"}}'
 ```
 
 ### 9.4 Reiniciar ArgoCD server para aplicar el cambio
@@ -737,3 +736,474 @@ git push
 ```
 
 > Comentario: si ya existe revisionHistoryLimit, mejor reemplazarla (evitás duplicados).
+
+---
+
+## 18) Extensión del mini caso real: cambios en la página web (ConfigMap) con Tekton + Argo CD
+
+> **Objetivo:** editar el contenido HTML servido por nginx (vía `ConfigMap hello-index`) usando **Tekton** para hacer commit/push en Git, y dejar que **Argo CD** sincronice y despliegue automáticamente.
+
+### 18.1 Archivos involucrados (fuente de verdad en Git)
+- Página HTML (fuente):
+  - `apps/hello-http/manifests/configmap.yaml`
+- Deployment nginx (monta el ConfigMap):
+  - `apps/hello-http/manifests/deploy.yaml`
+- Service/Route:
+  - `apps/hello-http/manifests/svc.yaml` y (si aplica) `apps/hello-http/manifests/route.yaml`
+
+**Check (ver el HTML en el repo):**
+```bash
+sed -n '1,220p' apps/hello-http/manifests/configmap.yaml
+grep -n "<h1>" -n apps/hello-http/manifests/configmap.yaml
+grep -n "<p>" -n apps/hello-http/manifests/configmap.yaml
+```
+
+> Comentario: Tekton va a modificar **este archivo** (`configmap.yaml`). Argo CD aplica el cambio al cluster.
+
+---
+
+### 18.2 Verificar que la app está arriba antes de cambiar nada (checks rápidos)
+#### 18.2.1 Argo CD OK (Synced/Healthy y commit actual)
+```bash
+oc -n openshift-gitops get application hello-http \
+  -o jsonpath='{.status.sync.status}{"\n"}{.status.health.status}{"\n"}{.status.sync.revision}{"\n"}'
+```
+
+#### 18.2.2 Deploy/Pods/Endpoints OK
+```bash
+oc -n hello-http get deploy hello-http -o wide
+oc -n hello-http get pods -l app=hello-http -o wide
+oc -n hello-http get endpoints hello-http -o wide
+oc -n hello-http rollout status deploy/hello-http
+```
+
+#### 18.2.3 Route + prueba HTTP/HTTPS (sin cache)
+```bash
+HOST=$(oc -n hello-http get route hello-http -o jsonpath='{.spec.host}')
+echo "HOST=$HOST"
+
+# HTTP
+curl -s "http://${HOST}" | head -n 40
+
+# HTTPS (saltando validación TLS de lab y evitando cache)
+curl -sk -H 'Cache-Control: no-cache' "https://${HOST}" | head -n 60
+```
+
+> Comentario: en CRC es normal usar `-k` en HTTPS por certificados self-signed / edge termination.
+
+---
+
+### 18.3 (Una sola vez) Asegurar credenciales GitHub para que Tekton pueda hacer push (PAT)
+> Aunque el repo sea público, **push** requiere autenticación. GitHub ya no acepta password para Git HTTPS.
+
+#### 18.3.1 Check del Secret y link al ServiceAccount `pipeline`
+```bash
+oc -n hello-http-ci get secret github-creds -o yaml | egrep -i 'name:|type:|tekton.dev/git-0|username:|password:' -n
+oc -n hello-http-ci get sa pipeline -o jsonpath='{.secrets[*].name}{"\n"}'
+```
+
+Esperado:
+- Secret type: `kubernetes.io/basic-auth`
+- annotation: `tekton.dev/git-0: https://github.com`
+- `pipeline` SA linkeado con `github-creds`
+
+> Comentario: el `password:` del secret debe ser el **PAT** (no tu password real).
+
+---
+
+### 18.4 Ejecutar cambio de texto en la página usando Tekton (PipelineRun)
+> Este PipelineRun hace: clone → sed → commit → push.
+
+#### 18.4.1 Ejecutar PipelineRun (ejemplo de reemplazo exacto)
+**Caso:** cambiar el `<p>` actual por otro `<p>`.
+
+```bash
+cat <<'EOF' | oc -n hello-http-ci create -f -
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: hello-http-ci-run-
+spec:
+  serviceAccountName: pipeline
+  pipelineRef:
+    name: hello-http-ci
+  workspaces:
+    - name: shared
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 1Gi
+  params:
+    - name: url
+      value: https://github.com/daisycpiris/openshift-gitops-lab-crc.git
+    - name: revision
+      value: main
+    - name: commitMessage
+      value: "CI: update hello-http page text"
+    - name: fileToEdit
+      value: "apps/hello-http/manifests/configmap.yaml"
+    - name: sedExpr
+      value: "s#<p>It's Friday!</p>#<p>Deployed via Tekton CI + Argo CD</p>#"
+EOF
+```
+
+> Comentario: **El patrón del `sedExpr` debe matchear exactamente** lo que hoy está en el archivo; si no, Tekton termina con “No changes to commit.”
+
+#### 18.4.2 Ver el estado del PipelineRun
+```bash
+oc -n hello-http-ci get pipelineruns --sort-by=.metadata.creationTimestamp | tail -n 10
+```
+
+#### 18.4.3 Ver logs del `commit-push` (diagnóstico rápido)
+```bash
+PR=$(oc -n hello-http-ci get pipelineruns --sort-by=.metadata.creationTimestamp -o jsonpath='{.items[-1].metadata.name}')
+echo "PR=$PR"
+
+TR=$(oc -n hello-http-ci get taskrun -l tekton.dev/pipelineRun=$PR,tekton.dev/pipelineTask=commit-push -o jsonpath='{.items[0].metadata.name}')
+echo "TR=$TR"
+
+POD=$(oc -n hello-http-ci get taskrun $TR -o jsonpath='{.status.podName}')
+echo "POD=$POD"
+
+oc -n hello-http-ci logs pod/$POD -c step-edit-commit-push
+```
+
+---
+
+### 18.5 Forzar refresh/sync de ArgoCD (cuando querés que aplique ya)
+> Si tu `syncPolicy` está en automated, normalmente no hace falta. En lab igual es útil.
+
+```bash
+oc -n openshift-gitops annotate application hello-http argocd.argoproj.io/refresh=hard --overwrite
+oc -n openshift-gitops get application hello-http \
+  -o jsonpath='{.status.sync.status}{"\n"}{.status.health.status}{"\n"}{.status.sync.revision}{"\n"}'
+```
+
+---
+
+### 18.6 Confirmar que el cambio se desplegó (3 niveles de verificación)
+#### 18.6.1 Verificación 1: Git tiene el commit nuevo
+```bash
+git pull
+git log -n 5 --oneline
+git show -- apps/hello-http/manifests/configmap.yaml | head -n 80
+```
+
+#### 18.6.2 Verificación 2: ConfigMap aplicado en el cluster
+```bash
+oc -n hello-http get cm hello-index -o yaml | sed -n '/index.html:/,$p' | head -n 60
+```
+
+#### 18.6.3 Verificación 3: lo que sirve nginx (curl) y lo que ve el pod
+```bash
+HOST=$(oc -n hello-http get route hello-http -o jsonpath='{.spec.host}')
+curl -sk -H 'Cache-Control: no-cache' "https://${HOST}" | grep -n "<p>" -n || true
+
+# Ver el contenido real montado dentro de los pods (definitivo)
+for p in $(oc -n hello-http get pods -l app=hello-http -o name); do
+  echo "=== $p ==="
+  oc -n hello-http rsh "${p#pod/}" sh -lc 'sed -n "1,120p" /usr/share/nginx/html/index.html'
+done
+```
+
+> Comentario: la verificación “dentro del pod” elimina dudas de cache/route.
+
+---
+
+## 19) Troubleshooting específico: cambios en la página web (ConfigMap) con Tekton + Argo
+
+### 19.1 Tekton: “No changes to commit.”
+**Síntoma:** en logs del step `edit-commit-push` aparece:
+- `git diff` vacío
+- `No changes to commit.`
+
+**Causa más común:** el `sedExpr` no matchea el texto actual exacto.
+
+**Check del texto actual en el repo:**
+```bash
+grep -n "<p>" apps/hello-http/manifests/configmap.yaml
+```
+
+**Solución práctica:** ajustar `sedExpr` para matchear exactamente lo que hay.
+
+> Comentario: si hay caracteres especiales (por ejemplo `+`, `!`, `'`), preferí **comillas dobles** para `sedExpr` dentro del YAML y escapá lo mínimo.
+
+---
+
+### 19.2 YAML parse error al crear PipelineRun (caso “It's Friday”)
+**Síntoma:**
+- `yaml: line XX: did not find expected key`
+
+**Causa:** estás usando YAML con comillas simples `'...'` y dentro hay un `'` (apóstrofe), por ejemplo `It's`.
+
+**Solución (recomendada):**
+- usar comillas dobles en `sedExpr` y en `commitMessage` si hay apóstrofes.
+
+Ejemplo correcto:
+```bash
+cat <<'EOF' | oc -n hello-http-ci create -f -
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: hello-http-ci-run-
+spec:
+  serviceAccountName: pipeline
+  pipelineRef:
+    name: hello-http-ci
+  workspaces:
+    - name: shared
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 1Gi
+  params:
+    - name: url
+      value: https://github.com/daisycpiris/openshift-gitops-lab-crc.git
+    - name: revision
+      value: main
+    - name: commitMessage
+      value: "CI: set page to It's Friday"
+    - name: fileToEdit
+      value: "apps/hello-http/manifests/configmap.yaml"
+    - name: sedExpr
+      value: "s#<p>It is Friday!</p>#<p>It's Friday!</p>#"
+EOF
+```
+
+> Comentario: Tekton/`sh` puede mostrar el apóstrofe escapado como `It'"'"'s` en logs; es normal.
+
+---
+
+### 19.3 Zsh: `cmdsubst quote>` o `parse error near ')'`
+**Síntoma:** el prompt queda en `cmdsubst quote>` o aparece `parse error near ')'`.
+
+**Causa común:**
+- copiaste comillas “curvas” (`’` / `“”`) en vez de `'` / `"`
+- paréntesis o comillas sin cerrar en el comando
+
+**Fix rápido:**
+- `Ctrl + C` para salir del modo “quote”
+- reescribir el comando con comillas normales
+
+Ejemplo correcto (ojo al último `'`):
+```bash
+TR=$(oc -n hello-http-ci get taskrun -l tekton.dev/pipelineRun=$PR,tekton.dev/pipelineTask=commit-push -o jsonpath='{.items[0].metadata.name}')
+```
+
+---
+
+### 19.4 ArgoCD dice Synced/Healthy pero el HTML no cambia
+**Causas típicas en lab:**
+- cache del navegador / route / cookie
+- estás mirando HTTP vs HTTPS
+- el ConfigMap cambió pero querés comprobar el contenido real
+
+**Checks definitivos (orden recomendado):**
+```bash
+# 1) Ver el ConfigMap aplicado (fuente real en cluster)
+oc -n hello-http get cm hello-index -o yaml | sed -n '/index.html:/,$p' | head -n 60
+
+# 2) Ver dentro del pod (confirmación final)
+POD=$(oc -n hello-http get pod -l app=hello-http -o jsonpath='{.items[0].metadata.name}')
+oc -n hello-http rsh "$POD" sh -lc 'sed -n "1,120p" /usr/share/nginx/html/index.html'
+
+# 3) Curl sin cache (HTTPS)
+HOST=$(oc -n hello-http get route hello-http -o jsonpath='{.spec.host}')
+curl -sk -H 'Cache-Control: no-cache' "https://${HOST}" | head -n 60
+```
+
+> Comentario: si el pod ve el HTML actualizado, el problema es “de afuera” (route/cache/https) y no del deploy.
+
+---
+
+### 19.5 HTTPS devuelve HTML “raro” o 503 (Route sin TLS edge)
+**Síntoma:**
+- `curl -Ik https://...` devuelve `503 Service Unavailable`
+- o te responde una página HTML distinta a la tuya
+
+**Solución (edge termination + redirect):**
+```bash
+oc -n hello-http patch route hello-http --type=merge -p '{
+  "spec":{
+    "tls":{
+      "termination":"edge",
+      "insecureEdgeTerminationPolicy":"Redirect"
+    }
+  }
+}'
+```
+
+Verificar:
+```bash
+HOST=$(oc -n hello-http get route hello-http -o jsonpath='{.spec.host}')
+curl -Ik "https://${HOST}"
+curl -sk "https://${HOST}" | head -n 30
+```
+
+---
+
+## 20) Operación diaria (mini checklist) para cambios de página
+> Útil para “hoy quiero cambiar el texto y ver que se despliegue”.
+
+1) Confirmar app OK:
+```bash
+oc -n openshift-gitops get application hello-http \
+  -o jsonpath='{.status.sync.status}{"\n"}{.status.health.status}{"\n"}{.status.sync.revision}{"\n"}'
+oc -n hello-http rollout status deploy/hello-http
+```
+
+2) Ejecutar PipelineRun (Tekton) con el `sedExpr` correcto (sección 18.4)
+
+3) Confirmar commit en Git:
+```bash
+git pull
+git log -n 3 --oneline
+```
+
+4) Confirmar Argo sincronizó:
+```bash
+oc -n openshift-gitops get application hello-http \
+  -o jsonpath='{.status.sync.status}{"\n"}{.status.health.status}{"\n"}{.status.sync.revision}{"\n"}'
+```
+
+5) Confirmar página:
+```bash
+HOST=$(oc -n hello-http get route hello-http -o jsonpath='{.spec.host}')
+curl -sk -H 'Cache-Control: no-cache' "https://${HOST}" | head -n 60
+```
+
+---
+
+## 21) Limpieza Tekton (para evitar DiskPressure) específica de hello-http-ci
+> En CRC conviene limpiar PipelineRuns/TaskRuns del namespace de CI.
+
+```bash
+oc -n hello-http-ci get pipelineruns --sort-by=.metadata.creationTimestamp | tail -n 20
+oc -n hello-http-ci delete pipelineruns --all
+oc -n hello-http-ci delete taskruns --all
+```
+
+> Comentario: esto no borra tus Tasks/Pipelines, solo ejecuciones (historial), y ayuda mucho con el espacio del nodo.
+
+---
+
+### 22) Nota: “Tekton tiene GUI?”
+- En OpenShift tenés la **Pipelines UI** (console plugin) para ver **Pipelines/Tasks/PipelineRuns/TaskRuns**.
+- También podés usar **tkn** (Tekton CLI) si lo instalás.
+
+**Checks rápidos (solo para confirmar que está el UI/plugin en consola):**
+- En la consola web de OpenShift, buscá:
+  - **Pipelines** → **PipelineRuns**
+  - **Pipelines** → **Tasks**
+  - **Pipelines** → **Pipelines**
+
+> Comentario: en CRC a veces depende de la versión/operador, pero normalmente aparece en el menú lateral cuando Pipelines está bien instalado.
+
+---
+
+## 23) Bloque adicional opcional: PipelineRun “plantilla” para editar la página sin depender del texto exacto
+
+> Objetivo: reducir el “No changes to commit” cuando el texto exacto del `<p>...</p>` cambió.
+>  
+> **Idea:** hacer un replace más “tolerante” usando regex en `sed` para reemplazar *cualquier* primer `<p>...</p>` o reemplazar por marcador.
+
+### 23.1 Reemplazar el primer `<p>...</p>` de la página (tolerante)
+> Nota: esto reemplaza el **primer** `<p>` que aparezca en `index.html` dentro del ConfigMap. Si tenés varios `<p>`, ajustalo.
+
+```bash
+cat <<'EOF' | oc -n hello-http-ci create -f -
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: hello-http-ci-run-
+spec:
+  serviceAccountName: pipeline
+  pipelineRef:
+    name: hello-http-ci
+  workspaces:
+    - name: shared
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 1Gi
+  params:
+    - name: url
+      value: https://github.com/daisycpiris/openshift-gitops-lab-crc.git
+    - name: revision
+      value: main
+    - name: commitMessage
+      value: "CI: update first <p> in hello-http page"
+    - name: fileToEdit
+      value: "apps/hello-http/manifests/configmap.yaml"
+    - name: sedExpr
+      value: "0,/<p>.*<\/p>/s#<p>.*<\/p>#<p>Deployed via Tekton CI + Argo CD</p>#"
+EOF
+```
+
+**Checks recomendados después:**
+```bash
+oc -n openshift-gitops annotate application hello-http argocd.argoproj.io/refresh=hard --overwrite
+HOST=$(oc -n hello-http get route hello-http -o jsonpath='{.spec.host}')
+curl -sk -H 'Cache-Control: no-cache' "https://${HOST}" | grep -n "<p>" -n || true
+```
+
+> Comentario: el prefijo `0,/.../` hace que `sed` solo reemplace en el primer match (evita reemplazar todos los `<p>`).
+
+---
+
+### 23.2 Cambiar el `<h1>...</h1>` (tolerante)
+```bash
+cat <<'EOF' | oc -n hello-http-ci create -f -
+apiVersion: tekton.dev/v1
+kind: PipelineRun
+metadata:
+  generateName: hello-http-ci-run-
+spec:
+  serviceAccountName: pipeline
+  pipelineRef:
+    name: hello-http-ci
+  workspaces:
+    - name: shared
+      volumeClaimTemplate:
+        spec:
+          accessModes: [ReadWriteOnce]
+          resources:
+            requests:
+              storage: 1Gi
+  params:
+    - name: url
+      value: https://github.com/daisycpiris/openshift-gitops-lab-crc.git
+    - name: revision
+      value: main
+    - name: commitMessage
+      value: "CI: update <h1> in hello-http page"
+    - name: fileToEdit
+      value: "apps/hello-http/manifests/configmap.yaml"
+    - name: sedExpr
+      value: "s#<h1>.*<\/h1>#<h1>Hello from Tekton + ArgoCD 👋</h1>#"
+EOF
+```
+
+---
+
+### 23.3 Debug rápido: validar que el patrón existe antes de correr Tekton (evita intentos en falso)
+```bash
+# Buscar patrones dentro del YAML del ConfigMap (en tu repo local)
+grep -n "<h1>" apps/hello-http/manifests/configmap.yaml
+grep -n "<p>" apps/hello-http/manifests/configmap.yaml
+
+# Si querés ver el bloque completo del index.html
+oc -n hello-http get cm hello-index -o yaml | sed -n '/index.html:/,$p' | head -n 120
+```
+
+---
+
+### 23.4 Nota práctica: usar delimitador # para evitar escapes
+> Regla: si hay `/` en HTML (por ejemplo `</p>`), es más cómodo usar `#` como delimitador en `sed` (como ya venís usando).
+
